@@ -38,6 +38,14 @@ Specify the **net amount** to refund — i.e. the amount excluding tax. It defau
 
 Polar **automatically calculates the corresponding tax** to refund based on the order's tax rate. For partial refunds, tax is prorated against the refunded portion; for a full refund, the entire remaining tax is returned.
 
+### Refunding a remaining tax balance through the API
+
+In the Next API version, `2027-01`, if an order has no refundable net amount but still has refundable tax, send `amount: 0` to `POST /v1/refunds/` with the `Polar-Version: 2027-01` header. This refunds the entire remaining tax balance. The response has `amount: 0` and a positive `tax_amount`; the customer receives that tax amount.
+
+Zero is only accepted for this tax-only remainder. If refundable net remains, or no refundable tax remains, the API returns `409 TaxOnlyRefundNotAvailable`. An already fully refunded order continues to return `403`. Negative amounts are invalid.
+
+This action is only available through the Next API; the dashboard refund form and stable API versions still require a positive net amount.
+
 ### Reason
 
 Select the reason for the refund — helpful for future reference.

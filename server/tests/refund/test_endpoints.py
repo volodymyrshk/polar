@@ -26,6 +26,7 @@ from polar.models.user_organization import OrganizationRole
 from polar.order.repository import OrderRepository
 from polar.postgres import AsyncSession
 from polar.refund.schemas import RefundCreate
+from polar.version import V2026_04, V2026_10, V2027_01
 from tests.fixtures import random_objects as ro
 from tests.fixtures.auth import AuthSubjectFixture
 from tests.fixtures.database import SaveFixture
@@ -293,6 +294,115 @@ class TestListRefunds(StripeRefund):
 
 @pytest.mark.anyio
 class TestCreateRefunds(StripeRefund):
+    @pytest.mark.auth(AuthSubjectFixture(scopes={Scope.refunds_write}))
+    @pytest.mark.api_version(V2027_01)
+    async def test_refund_tax_only_remainder(
+        self,
+        session: AsyncSession,
+        save_fixture: SaveFixture,
+        client: AsyncClient,
+        user_organization: UserOrganization,
+        stripe_service_mock: MagicMock,
+        product: Product,
+        customer: Customer,
+    ) -> None:
+        order, payment, _ = await create_order_and_payment(
+            save_fixture, product=product, customer=customer, amount=52, tax_amount=10
+        )
+        await ro.create_refund(
+            save_fixture,
+            order,
+            payment,
+            status=RefundStatus.succeeded,
+            amount=52,
+            tax_amount=0,
+        )
+        order.update_refunds(52, 0)
+        await save_fixture(order)
+        stripe_service_mock.create_refund.return_value = build_stripe_refund(
+            amount=10, charge_id=payment.processor_id
+        )
+
+        response = await client.post(
+            "/v1/refunds/",
+            json={"order_id": str(order.id), "reason": "customer_request", "amount": 0},
+        )
+
+        assert response.status_code == 201
+        assert response.json()["amount"] == 0
+        assert response.json()["tax_amount"] == 10
+        assert response.json()["status"] == "succeeded"
+        assert stripe_service_mock.create_refund.call_args.kwargs["amount"] == 10
+        updated = await OrderRepository.from_session(session).get_by_id(order.id)
+        assert updated is not None
+        order = updated
+        assert order.refunded_amount == 52
+        assert order.refunded_tax_amount == 10
+        assert order.status == OrderStatus.refunded
+        assert order.remaining_balance == 0
+
+        response = await client.post(
+            "/v1/refunds/",
+            json={"order_id": str(order.id), "reason": "customer_request", "amount": 0},
+        )
+        assert response.status_code == 403
+        assert stripe_service_mock.create_refund.call_count == 1
+
+    @pytest.mark.auth(AuthSubjectFixture(scopes={Scope.refunds_write}))
+    @pytest.mark.api_version(V2027_01)
+    @pytest.mark.parametrize(("amount", "expected_status"), [(0, 409), (-1, 422)])
+    async def test_nonpositive_refund_without_tax_only_remainder(
+        self,
+        save_fixture: SaveFixture,
+        client: AsyncClient,
+        user_organization: UserOrganization,
+        stripe_service_mock: MagicMock,
+        product: Product,
+        customer: Customer,
+        amount: int,
+        expected_status: int,
+    ) -> None:
+        order, _, _ = await create_order_and_payment(
+            save_fixture, product=product, customer=customer, amount=52, tax_amount=10
+        )
+
+        response = await client.post(
+            "/v1/refunds/",
+            json={
+                "order_id": str(order.id),
+                "reason": "customer_request",
+                "amount": amount,
+            },
+        )
+
+        assert response.status_code == expected_status
+        stripe_service_mock.create_refund.assert_not_called()
+
+    @pytest.mark.auth(AuthSubjectFixture(scopes={Scope.refunds_write}))
+    @pytest.mark.api_version(V2026_04, V2026_10)
+    async def test_stable_api_rejects_zero_net_refund(
+        self,
+        save_fixture: SaveFixture,
+        client: AsyncClient,
+        user_organization: UserOrganization,
+        stripe_service_mock: MagicMock,
+        product: Product,
+        customer: Customer,
+    ) -> None:
+        order, _, _ = await create_order_and_payment(
+            save_fixture, product=product, customer=customer, amount=52, tax_amount=10
+        )
+        order.update_refunds(52, 0)
+        await save_fixture(order)
+
+        response = await client.post(
+            "/v1/refunds/",
+            json={"order_id": str(order.id), "reason": "customer_request", "amount": 0},
+        )
+
+        assert response.status_code == 422
+        stripe_service_mock.create_refund.assert_not_called()
+
     async def test_anonymous(
         self, client: AsyncClient, organization: Organization
     ) -> None:
@@ -349,6 +459,7 @@ class TestCreateRefunds(StripeRefund):
     @pytest.mark.auth(
         AuthSubjectFixture(scopes={Scope.refunds_write}),
     )
+    @pytest.mark.api_version(V2026_10, V2027_01)
     async def test_valid_partial_to_full(
         self,
         session: AsyncSession,

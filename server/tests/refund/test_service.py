@@ -28,6 +28,7 @@ from polar.refund.service import (
     MissingRelatedDispute,
     RefundedAlready,
     RefundPaymentTransactionNotFound,
+    TaxOnlyRefundNotAvailable,
 )
 from polar.refund.service import refund as refund_service
 from polar.tax.calculation import TaxCalculationService
@@ -205,6 +206,94 @@ class StripeRefund:
 
 @pytest.mark.anyio
 class TestCreate(StripeRefund):
+    async def test_tax_only_remainder(
+        self,
+        session: AsyncSession,
+        save_fixture: SaveFixture,
+        stripe_service_mock: MagicMock,
+        tax_calculation_service_service_mock: MagicMock,
+        refund_transaction_service_mock: MagicMock,
+        product: Product,
+        customer: Customer,
+    ) -> None:
+        order, payment, _ = await create_order_and_payment(
+            save_fixture,
+            product=product,
+            customer=customer,
+            subtotal_amount=52,
+            tax_amount=10,
+            tax_processor=TaxProcessor.stripe,
+            tax_transaction_processor_id="TAX_TRANSACTION_ID",
+            billing_address=Address(country=CountryAlpha2("FR")),
+        )
+        order.update_refunds(52, 0)
+        await save_fixture(order)
+        stripe_service_mock.create_refund.return_value = build_stripe_refund(
+            amount=10, charge_id=payment.processor_id
+        )
+        tax_calculation_service_service_mock.revert.return_value = "TAX_REVERSAL_ID"
+
+        refund = await refund_service.create(
+            session,
+            order,
+            RefundCreate(
+                order_id=order.id, reason=RefundReason.customer_request, amount=0
+            ),
+        )
+
+        assert refund.amount == 0
+        assert refund.tax_amount == 10
+        assert order.status == OrderStatus.refunded
+        assert order.remaining_balance == 0
+        assert stripe_service_mock.create_refund.call_args.kwargs["amount"] == 10
+        refund_transaction_service_mock.create.assert_called_once_with(
+            session, refund=refund
+        )
+        tax_calculation_service_service_mock.revert.assert_called_once()
+        assert (
+            tax_calculation_service_service_mock.revert.call_args.kwargs[
+                "reverted_amount"
+            ]
+            == 10
+        )
+        assert (
+            tax_calculation_service_service_mock.revert.call_args.kwargs[
+                "reverted_tax_amount"
+            ]
+            == 10
+        )
+
+    @pytest.mark.parametrize(("refunded_amount", "tax_amount"), [(0, 10), (52, 0)])
+    async def test_zero_net_refund_requires_positive_tax_only_remainder(
+        self,
+        session: AsyncSession,
+        save_fixture: SaveFixture,
+        stripe_service_mock: MagicMock,
+        product: Product,
+        customer: Customer,
+        refunded_amount: int,
+        tax_amount: int,
+    ) -> None:
+        order, _, _ = await create_order_and_payment(
+            save_fixture,
+            product=product,
+            customer=customer,
+            subtotal_amount=52,
+            tax_amount=tax_amount,
+        )
+        order.refunded_amount = refunded_amount
+
+        with pytest.raises(TaxOnlyRefundNotAvailable):
+            await refund_service.create(
+                session,
+                order,
+                RefundCreate(
+                    order_id=order.id, reason=RefundReason.customer_request, amount=0
+                ),
+            )
+
+        stripe_service_mock.create_refund.assert_not_called()
+
     async def test_missing_payment_transaction(
         self,
         session: AsyncSession,

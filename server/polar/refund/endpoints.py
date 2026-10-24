@@ -3,6 +3,7 @@ from fastapi import Depends, Query
 from polar.customer.schemas.customer import CustomerID, ExternalCustomerID
 from polar.kit.pagination import ListResource, PaginationParamsQuery
 from polar.kit.schemas import MultipleQueryFilter
+from polar.kit.versioning import version
 from polar.models import Refund
 from polar.openapi import APITag
 from polar.order.schemas import OrderID
@@ -10,11 +11,12 @@ from polar.organization.schemas import OrganizationID
 from polar.postgres import AsyncSession, get_db_session
 from polar.routing import APIRouter
 from polar.subscription.schemas import SubscriptionID
+from polar.version import V2027_01
 
-from . import auth
+from . import auth, legacy_schemas
 from .schemas import Refund as RefundSchema
 from .schemas import RefundCreate, RefundID
-from .service import RefundedAlready
+from .service import RefundedAlready, TaxOnlyRefundNotAvailable
 from .service import refund as refund_service
 from .sorting import RefundListSorting
 
@@ -91,6 +93,38 @@ async def list(
     },
 )
 async def create(
+    refund_create: legacy_schemas.RefundCreate,
+    auth_subject: auth.RefundsWrite,
+    session: AsyncSession = Depends(get_db_session),
+) -> Refund:
+    """Create a refund."""
+    return await refund_service.user_create(
+        session,
+        auth_subject,
+        create_schema=refund_create,
+    )
+
+
+@router.post(
+    "/",
+    name="create",
+    summary="Create Refund",
+    response_model=RefundSchema,
+    status_code=201,
+    responses={
+        201: {"description": "Refund created."},
+        403: {
+            "description": "Order is already fully refunded.",
+            "model": RefundedAlready.schema(),
+        },
+        409: {
+            "description": "The order does not have a tax-only remainder to refund.",
+            "model": TaxOnlyRefundNotAvailable.schema(),
+        },
+    },
+)
+@version(starting_from=V2027_01)
+async def create_v2027_01(
     refund_create: RefundCreate,
     auth_subject: auth.RefundsWrite,
     session: AsyncSession = Depends(get_db_session),

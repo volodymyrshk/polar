@@ -84,6 +84,15 @@ class RefundedAlready(RefundError):
         super().__init__(message, 403)
 
 
+class TaxOnlyRefundNotAvailable(RefundError):
+    def __init__(self) -> None:
+        message = (
+            "A zero net refund requires no refundable net amount "
+            "and a positive remaining tax amount."
+        )
+        super().__init__(message, 409)
+
+
 class RefundDisputedPayment(RefundError):
     def __init__(self, order: Order) -> None:
         self.order = order
@@ -229,6 +238,11 @@ class RefundService:
 
         if order.refunded:
             raise RefundedAlready(order)
+
+        if create_schema.amount == 0 and (
+            order.refundable_amount != 0 or order.refundable_tax_amount <= 0
+        ):
+            raise TaxOnlyRefundNotAvailable()
 
         is_subscription = order.subscription_id is not None
         if create_schema.revoke_benefits and is_subscription:

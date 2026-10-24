@@ -112,6 +112,52 @@ async def create_order_and_refund(
 
 @pytest.mark.anyio
 class TestCreate:
+    @pytest.mark.parametrize("settlement_tax_amount", [10, 15])
+    async def test_tax_only_refund_and_reversal(
+        self,
+        session: AsyncSession,
+        save_fixture: SaveFixture,
+        customer: Customer,
+        stripe_service_mock: MagicMock,
+        settlement_tax_amount: int,
+    ) -> None:
+        refund, order, payment = await create_order_and_refund(
+            save_fixture,
+            customer,
+            subtotal_amount=52,
+            tax_amount=10,
+            refund_subtotal_amount=0,
+            refund_tax_amount=10,
+        )
+        await create_transaction(
+            save_fixture,
+            type=TransactionType.payment,
+            amount=52,
+            tax_amount=10,
+            order=order,
+            payment_customer=customer,
+            charge_id=payment.processor_id,
+        )
+        stripe_service_mock.get_balance_transaction.return_value = (
+            build_stripe_balance_transaction(amount=-settlement_tax_amount)
+        )
+
+        transaction = await refund_transaction_service.create(session, refund)
+        await session.flush()
+
+        assert transaction.amount == 0
+        assert transaction.tax_amount == -settlement_tax_amount
+        assert transaction.presentment_amount == 0
+        assert transaction.presentment_tax_amount == -10
+
+        refund.status = RefundStatus.canceled
+        reversal = await refund_transaction_service.revert(session, refund)
+
+        assert reversal.amount == 0
+        assert reversal.tax_amount == settlement_tax_amount
+        assert reversal.presentment_amount == 0
+        assert reversal.presentment_tax_amount == 10
+
     @pytest.mark.parametrize("status", [RefundStatus.pending, RefundStatus.failed])
     async def test_not_succeeded_refund(
         self,

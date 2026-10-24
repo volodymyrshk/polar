@@ -48,7 +48,13 @@ class Refund(MetadataOutputMixin, IDSchema, TimestampedSchema):
 class RefundCreate(MetadataInputMixin, Schema):
     order_id: UUID4
     reason: ManualRefundReason = Field(description="Reason for the refund.")
-    amount: int = Field(description="Amount to refund in cents. Minimum is 1.", gt=0)
+    amount: int = Field(
+        description=(
+            "Net amount to refund in cents. Use 0 only to refund all remaining tax "
+            "when the order has no refundable net amount."
+        ),
+        ge=0,
+    )
     comment: str | None = Field(
         None, description="An internal comment about the refund."
     )
