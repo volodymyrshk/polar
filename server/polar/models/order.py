@@ -372,9 +372,12 @@ class Order(CustomFieldDataMixin, MetadataMixin, RecordModel):
         new_amount = self.refunded_amount + refunded_amount
         new_tax_amount = self.refunded_tax_amount + refunded_tax_amount
 
-        if new_amount == 0:
+        if new_amount == 0 and new_tax_amount == 0:
             new_status = OrderStatus.paid
-        elif new_amount >= (self.net_amount + self.applied_balance_amount):
+        elif (
+            new_amount >= (self.net_amount + self.applied_balance_amount)
+            and new_tax_amount >= self.tax_amount
+        ):
             new_status = OrderStatus.refunded
         else:
             new_status = OrderStatus.partially_refunded
@@ -449,6 +452,10 @@ class Order(CustomFieldDataMixin, MetadataMixin, RecordModel):
         )
         refunded_tax_amount = min(refunded_tax_amount, self.refundable_tax_amount)
         refunded_amount = total_refund_amount - refunded_tax_amount
+        # Oversized processor refunds retain their existing allocation behavior.
+        if total_refund_amount <= self.remaining_balance:
+            refunded_amount = min(refunded_amount, self.refundable_amount)
+            refunded_tax_amount = total_refund_amount - refunded_amount
         return refunded_amount, refunded_tax_amount
 
     def calculate_refunded_tax_from_subtotal(self, refund_amount: int) -> int:

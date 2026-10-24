@@ -573,6 +573,52 @@ class TestCreate(StripeRefund):
         assert updated_order.refunded_amount == 600
         assert updated_order.refunded_tax_amount == 150
 
+    async def test_partial_refunds_rounding_and_repeated_webhooks(
+        self,
+        session: AsyncSession,
+        refund_transaction_service_mock: MagicMock,
+        save_fixture: SaveFixture,
+        product: Product,
+        customer: Customer,
+    ) -> None:
+        order, payment, transaction = await create_order_and_payment(
+            save_fixture,
+            product=product,
+            customer=customer,
+            subtotal_amount=52,
+            tax_amount=10,
+        )
+        totals = [32, 9, 8, 3, 6, 3, 1]
+        for index, total in enumerate(totals):
+            stripe_refund = build_stripe_refund(
+                id=f"re_rounding_{index}",
+                status="succeeded",
+                amount=total,
+                charge_id=payment.processor_id,
+            )
+            refund = await refund_service.upsert_from_stripe(session, stripe_refund)
+            await session.flush()
+            await session.refresh(order)
+            await session.refresh(refund)
+            assert refund.total_amount == total
+            assert 0 <= order.refunded_amount <= 52
+            assert 0 <= order.refunded_tax_amount <= 10
+            assert order.remaining_balance == 62 - sum(totals[: index + 1])
+            assert order.status == (
+                OrderStatus.refunded
+                if index == len(totals) - 1
+                else OrderStatus.partially_refunded
+            )
+
+            await refund_service.upsert_from_stripe(session, stripe_refund)
+            assert order.refunded_amount + order.refunded_tax_amount == sum(
+                totals[: index + 1]
+            )
+            assert refund_transaction_service_mock.create.await_count == index + 1
+
+        assert order.refunded_amount == 52
+        assert order.refunded_tax_amount == 10
+
     async def test_missing_related_dispute(
         self,
         session: AsyncSession,
